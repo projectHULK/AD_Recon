@@ -17,6 +17,7 @@
 * SharpView: https://book.hacktricks.xyz/windows-hardening/basic-powershell-for-pentesters/powerview
 * Snaffler: https://github.com/SnaffCon/Snaffler
 * Seth: https://github.com/SySS-Research/Seth
+* Responder And MultiRelay: https://github.com/lgandx/Responder-Windows
 
 # How to use .ps1 files:-
 * ADRecon: https://www.hacking.land/2018/01/adrecon-tool-which-gathers-information.html?m=1
