@@ -8,4 +8,5 @@
 # Import all modules oneliner: (Windows)
 * Get-Module -ListAvailable | Import-Module
 
-# Note that some tools my require  elevated privilege 
+# Note:
+* Some tools my require  elevated privilege 
