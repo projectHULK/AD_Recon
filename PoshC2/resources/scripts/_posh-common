@@ -1,0 +1,68 @@
+#!/bin/bash
+
+check_if_mac(){
+    if [ "$(uname)" == "Darwin" ]; then
+        IS_MAC=true
+    else
+        IS_MAC=false
+    fi
+}
+
+get_posh_projects_dir(){
+    check_if_mac
+    if [ "$IS_MAC" = true ]; then
+        POSH_PROJECTS_DIR="/private/var/poshc2"
+    else
+        POSH_PROJECTS_DIR="/var/poshc2"
+    fi
+}
+
+get_docker_posh_projects_dir(){
+    DOCKER_POSH_PROJECTS_DIR="/var/poshc2"
+}
+
+get_posh_dir() {
+    check_if_mac
+    if [ "$IS_MAC" = true ]; then
+        SCRIPT_LOCATION=`readlink -n $0`
+        if [ -z "$SCRIPT_LOCATION" ]; then
+            echo "In Docker install, using POSHC2_INSTALL_DIR environment variable for PoshC2 installation directory"
+            echo "This is only required if developing with Docker."
+            POSH_DIR="$POSHC2_INSTALL_DIR"
+            if [ -z "$POSH_DIR" ]; then
+                echo "POSHC2_INSTALL_DIR environment variable not set, defaulting to /opt/PoshC2"
+                POSH_DIR="/opt/PoshC2"
+            else
+                echo "POSH_DIR set to $POSH_DIR"
+                return
+            fi
+        fi
+        POSH_DIR="`dirname $SCRIPT_LOCATION`/../../"
+    else
+        SCRIPT_LOCATION=`readlink -f -n $0`
+        POSH_DIR="`dirname $SCRIPT_LOCATION`/../../"
+    fi
+}
+
+get_posh_project(){
+    get_posh_projects_dir
+    POSH_PROJECT=`cat $POSH_PROJECTS_DIR/CURRENT_PROJECT 2>/dev/null`
+    if [ -z "$POSH_PROJECT" ]; then
+        echo "No PoshC2 project set, please run posh-project"
+        exit 1
+    fi
+}
+
+get_posh_project_dir(){
+    get_posh_projects_dir
+    get_posh_project
+    POSH_PROJECT_DIR="$POSH_PROJECTS_DIR/$POSH_PROJECT"
+    if [ ! -d "$POSH_PROJECT_DIR" ]; then
+        echo "No PoshC2 project directory, please run posh-project"
+        exit 1
+    fi
+}
+
+get_docker_image_name(){
+    DOCKER_IMAGE_NAME="m0rv4i/poshc2"
+}

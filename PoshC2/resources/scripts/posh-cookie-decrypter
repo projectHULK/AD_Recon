@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# trap ctrl-c and call ctrl_c()
+trap ctrl_c INT
+
+function ctrl_c() {
+    popd > /dev/null
+    exit
+}
+
+source /usr/local/bin/_posh-common
+get_posh_dir
+
+pushd $POSH_DIR  >/dev/null
+if [ "$?" -eq "0" ]; then
+
+    sudo python3 -m pipenv run python3 "$POSH_DIR/cookie_decrypter.py"
+    popd > /dev/null
+
+fi
+

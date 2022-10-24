@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# trap ctrl-c and call ctrl_c()
+trap ctrl_c INT
+
+function ctrl_c() {
+    popd > /dev/null
+    exit
+}
+
+# A POSIX variable
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+
+# Initialize our own variables:
+GIT_BRANCH="master"
+MANUAL_BRANCH_SET=false
+SKIP_INSTALL=false
+
+show_help(){
+    echo "*** PoshC2 Update Script ***"
+    echo "Usage:"
+    echo "posh-update -b <git branch> -x (Skips running install script)"
+    echo ""
+    echo "Default is the master branch"
+}
+
+while getopts "xh?b:" opt; do
+    case "$opt" in
+    h|\?)
+        show_help
+        exit 0
+        ;;
+    b)  GIT_BRANCH="$OPTARG"
+        MANUAL_BRANCH_SET=true
+        ;;
+    x)  SKIP_INSTALL=true
+        ;;
+    esac
+done
+
+
+
+source /usr/local/bin/_posh-common
+get_posh_dir
+
+pushd $POSH_DIR  >/dev/null
+
+if [ "$?" -eq "0" ]; then
+
+    if [ "$MANUAL_BRANCH_SET" == "false" ]; then
+        GIT_BRANCH=`git rev-parse --abbrev-ref HEAD`
+    fi
+
+    echo ""
+    echo -e """\033[92m
+       __________            .__.     _________  ________
+       \_______  \____  _____|  |__   \_   ___ \ \_____  \\
+        |     ___/  _ \/  ___/  |  \  /    \  \/  /  ____/
+        |    |  (  <_> )___ \|   Y  \ \     \____/       \\
+        |____|   \____/____  >___|  /  \______  /\_______ \\
+                           \/     \/          \/         \/
+        ================= www.PoshC2.co.uk ================"""
+    echo ""
+    echo "[+] Updating PoshC2"
+    echo ""
+
+    if [[ $(id -u) -ne 0 ]]; then
+        echo -e "You must run this installer as root.\nQuitting!";
+        exit 1;
+    fi
+
+    echo ""
+    echo "[+] Updating Posh Installation to latest $GIT_BRANCH"
+    git fetch
+    git reset --hard origin/"$GIT_BRANCH"
+
+    if [ "$SKIP_INSTALL" == "false" ]; then
+
+      echo ""
+      echo "[+] Running Install script"
+      ./Install.sh -b "$GIT_BRANCH" -p "$POSH_DIR"
+
+    fi
+
+    echo ""
+    echo "[+] Update complete"
+    echo ""
+
+    popd > /dev/null
+fi

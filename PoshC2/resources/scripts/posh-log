@@ -1,0 +1,8 @@
+#!/bin/bash
+
+source /usr/local/bin/_posh-common
+get_posh_project_dir
+
+tail -n 5000 -f "$POSH_PROJECT_DIR/poshc2_server.log" 2>/dev/null\
+	|| ( echo -e "\e[31m[!] Could not open logfile: "$POSH_PROJECT_DIR/poshc2_server.log"\e[0m")
+

