@@ -9,4 +9,7 @@
 * Get-Module -ListAvailable | Import-Module
 
 # Note:
-* Some tools my require  elevated privilege 
+* Some tools my require  elevated privilege
+
+# AD Road map:
+* Coming Soon
