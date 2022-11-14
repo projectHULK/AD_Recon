@@ -3,7 +3,6 @@
 
 # Download as zip or clone it:
 * git clone https://github.com/projectHULK/AD_Recon.git
-* Send the above file to your windows system
 
 # Import all modules oneliner: (Windows)
 * Get-Module -ListAvailable | Import-Module
