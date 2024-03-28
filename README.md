@@ -9,7 +9,7 @@
 
 # As a good practice
 1) Insted of download script one-by-one, create a powershell script which will load all your tools to the system.
-2) Run any AMSI bypass comand and call your script to run them in momory 'bypassing Defender'.
+2) Run any AMSI bypass comand and call your script to run them in Memory 'bypassing Defender'.
 * I have created Enum.ps1 which will download all the tools 'Put your IP'.
 3) You can use the bellow oneliner to bypass AMSI, download Enum.ps1 and run in memory:
 * Option 1)
